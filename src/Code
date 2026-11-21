@@ -1,0 +1,411 @@
+#include <algorithm>
+#include <cctype>
+#include <climits>
+#include <cmath>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <sstream>
+#include <string>
+using namespace std;
+// ================= INPUT VALIDATION (cross-cutting) =================
+// Prints the prompt and reads one line. Returns false if input has ended (EOF).
+bool readLine(const string &prompt, string &out) {
+cout << prompt;
+return static_cast<bool>(getline(cin, out));
+}
+// Converts text to an integer from 1 to maxValue.
+bool parsePositiveInt(const string &text, int &out, int maxValue = INT_MAX) {
+try {
+size_t pos;
+int number = stoi(text, &pos);
+if (pos != text.size() || number <= 0 || number > maxValue) {
+return false;
+}
+out = number;
+return true;
+} catch (...) {
+return false;
+}
+}
+// Converts text to a GPA from 1.00 to 5.00. Rejects "nan", "inf", and extra characters.
+bool parseGPA(const string &text, double &out) {
+try {
+size_t pos;
+double value = stod(text, &pos);
+if (pos != text.size() || !isfinite(value) ||
+value < 1.0 || value > 5.0) {
+return false;
+}
+out = value;
+return true;
+} catch (...) {
+return false;
+}
+}
+// Text must not be blank and must not contain the '|' separator.
+bool validText(const string &text) {
+return text.find_first_not_of(" \t\r") != string::npos &&
+text.find('|') == string::npos;
+}
+// ================= STUDENT LIST (business + data layer) =================
+// One node of the linked list
+struct Student {
+int id;
+string name;
+int age;
+string year;
+string course;
+double gpa;
+Student *next;
+};
+// Fields the list can be sorted by
+enum class SortBy { ID, NAME, GPA };
+class StudentList {
+private:
+Student *head;
+Student *tail; // lets addStudent() run in O(1)
+int count;
+void clear(); // frees every node (used by the destructor)
+static bool comesBefore(const Student *a, const Student *b, SortBy field);
+public:
+StudentList();
+~StudentList();
+// The list owns raw pointers, so copying is disabled to avoid double delete
+StudentList(const StudentList &) = delete;
+StudentList &operator=(const StudentList &) = delete;
+bool idExists(int id) const;
+bool addStudent(int id, const string &name, int age,
+const string &year, const string &course,
+double gpa); // false if ID already exists
+bool deleteStudent(int id); // node bypass; false if ID not found
+void sortBy(SortBy field); // insertion sort that relinks nodes
+void displayStudents() const;
+bool saveToFile(const string &filename) const;
+bool loadFromFile(const string &filename); // false if file not found
+int size() const;
+};
+StudentList::StudentList() : head(nullptr), tail(nullptr), count(0) {}
+StudentList::~StudentList() {
+clear();
+}
+void StudentList::clear() {
+Student *current = head;
+while (current != nullptr) {
+Student *toDelete = current;
+current = current->next;
+delete toDelete;
+}
+head = nullptr;
+tail = nullptr;
+count = 0;
+}
+bool StudentList::idExists(int id) const {
+for (Student *current = head; current != nullptr; current = current->next) {
+if (current->id == id) {
+return true;
+}
+}
+return false;
+}
+bool StudentList::addStudent(int id, const string &name, int age,
+const string &year, const string &course,
+double gpa) {
+if (idExists(id)) {
+return false;
+}
+Student *newStudent = new Student{id, name, age, year, course, gpa, nullptr};
+if (head == nullptr) {
+head = newStudent;
+} else {
+tail->next = newStudent;
+}
+tail = newStudent;
+count++;
+return true;
+}
+bool StudentList::deleteStudent(int id) {
+Student *previous = nullptr;
+Student *current = head;
+// Find the node with the given ID
+while (current != nullptr && current->id != id) {
+previous = current;
+current = current->next;
+}
+if (current == nullptr) {
+return false; // ID not found
+}
+// Node bypass: skip over the node by relinking its neighbors
+if (previous == nullptr) {
+head = current->next; // deleting the first node
+} else {
+previous->next = current->next;
+}
+if (current == tail) {
+tail = previous; // deleting the last node
+}
+delete current;
+count--;
+return true;
+}
+static string toLower(string text) {
+transform(text.begin(), text.end(), text.begin(),
+[](unsigned char c) { return static_cast<char>(tolower(c)); });
+return text;
+}
+// True only if a should be placed strictly before b
+bool StudentList::comesBefore(const Student *a, const Student *b, SortBy field) {
+switch (field) {
+case SortBy::ID:
+return a->id < b->id;
+case SortBy::NAME:
+return toLower(a->name) < toLower(b->name);
+case SortBy::GPA:
+return a->gpa < b->gpa; // 1.00 is the best grade, so it comes first
+}
+return false;
+}
+void StudentList::sortBy(SortBy field) {
+if (head == nullptr || head->next == nullptr) {
+return; // 0 or 1 node: already sorted
+}
+Student *sorted = nullptr; // the new sorted list
+Student *current = head;
+while (current != nullptr) {
+Student *nextNode = current->next;
+if (sorted == nullptr || comesBefore(current, sorted, field)) {
+current->next = sorted; // insert at the front
+sorted = current;
+} else {
+Student *walker = sorted;
+// Move past nodes that are not greater (keeps equal items in order)
+while (walker->next != nullptr &&
+!comesBefore(current, walker->next, field)) {
+walker = walker->next;
+}
+current->next = walker->next;
+walker->next = current;
+}
+current = nextNode;
+}
+head = sorted;
+// The last node may have changed, so update tail
+tail = head;
+while (tail->next != nullptr) {
+tail = tail->next;
+}
+}
+void StudentList::displayStudents() const {
+if (head == nullptr) {
+cout << "No student records found.\n";
+return;
+}
+cout << "\n===== STUDENT RECORDS =====\n";
+for (Student *current = head; current != nullptr; current = current->next) {
+cout << "ID: " << current->id << '\n';
+cout << "Name: " << current->name << '\n';
+cout << "Age: " << current->age << '\n';
+cout << "Year Level: " << current->year << '\n';
+cout << "Course: " << current->course << '\n';
+cout << fixed << setprecision(2);
+cout << "GPA: " << current->gpa << '\n';
+cout << "---------------------------\n";
+}
+}
+bool StudentList::saveToFile(const string &filename) const {
+ofstream file(filename);
+if (!file) {
+cout << "Error opening file for saving.\n";
+return false;
+}
+for (Student *current = head; current != nullptr; current = current->next) {
+file << current->id << '|'
+<< current->name << '|'
+<< current->age << '|'
+<< current->year << '|'
+<< current->course << '|'
+<< fixed << setprecision(2) << current->gpa
+<< '\n';
+}
+if (!file) {
+cout << "Error while writing to file.\n";
+return false;
+}
+cout << "Records saved to " << filename << ".\n";
+return true;
+}
+bool StudentList::loadFromFile(const string &filename) {
+ifstream file(filename);
+if (!file) {
+cout << "No existing file. Starting a new list.\n";
+return false;
+}
+string line;
+int loaded = 0, skipped = 0;
+while (getline(file, line)) {
+if (line.empty()) {
+continue;
+}
+stringstream ss(line);
+string idText, name, ageText, year, course, gpaText;
+if (!(getline(ss, idText, '|') && getline(ss, name, '|') &&
+getline(ss, ageText, '|') && getline(ss, year, '|') &&
+getline(ss, course, '|') && getline(ss, gpaText))) {
+skipped++;
+continue;
+}
+int id, age;
+double gpa;
+if (!parsePositiveInt(idText, id) ||
+!parsePositiveInt(ageText, age, 120) ||
+!parseGPA(gpaText, gpa) ||
+!validText(name) || !validText(year) || !validText(course) ||
+!addStudent(id, name, age, year, course, gpa)) {
+skipped++; // bad value, bad text, or duplicate ID
+continue;
+}
+loaded++;
+}
+cout << loaded << " record(s) loaded";
+if (skipped > 0) {
+cout << ", " << skipped << " invalid record(s) skipped";
+}
+cout << ".\n";
+return true;
+}
+int StudentList::size() const {
+return count;
+}
+// ================= MENUS (presentation layer) =================
+const string FILE_NAME = "students.txt";
+// Asks for every field, validates it, then adds the student
+void addStudentMenu(StudentList &list) {
+string input, name, year, course;
+int id, age;
+double gpa;
+if (!readLine("Enter student ID: ", input) ||
+!parsePositiveInt(input, id)) {
+cout << "Invalid ID. Enter a positive integer.\n";
+return;
+}
+if (list.idExists(id)) {
+cout << "That ID already exists.\n";
+return;
+}
+if (!readLine("Enter student name: ", name) || !validText(name)) {
+cout << "Invalid name.\n";
+return;
+}
+if (!readLine("Enter student age: ", input) ||
+!parsePositiveInt(input, age, 120)) {
+cout << "Invalid age. Enter a whole number from 1 to 120.\n";
+return;
+}
+if (!readLine("Enter year level (e.g. 2nd Year): ", year) ||
+!validText(year)) {
+cout << "Invalid year level.\n";
+return;
+}
+if (!readLine("Enter course (e.g. BSCpE): ", course) ||
+!validText(course)) {
+cout << "Invalid course.\n";
+return;
+}
+if (!readLine("Enter GPA (1.00 - 5.00): ", input) ||
+!parseGPA(input, gpa)) {
+cout << "Invalid GPA. Enter a value from 1.00 to 5.00.\n";
+return;
+}
+list.addStudent(id, name, age, year, course, gpa);
+cout << "Student added successfully.\n";
+}
+// Asks for an ID and removes that student
+void deleteStudentMenu(StudentList &list) {
+string input;
+int id;
+if (!readLine("Enter ID of student to delete: ", input) ||
+!parsePositiveInt(input, id)) {
+cout << "Invalid ID. Enter a positive integer.\n";
+return;
+}
+if (list.deleteStudent(id)) {
+cout << "Student " << id << " deleted.\n";
+} else {
+cout << "No student with ID " << id << " found.\n";
+}
+}
+// Asks which field to sort by, sorts, then shows the result
+void sortStudentsMenu(StudentList &list) {
+if (list.size() < 2) {
+cout << "Not enough records to sort.\n";
+return;
+}
+cout << "Sort by:\n";
+cout << "1. ID\n";
+cout << "2. Name (A-Z)\n";
+cout << "3. GPA (best first, 1.00 is highest)\n";
+string input;
+int option;
+if (!readLine("Enter option: ", input) ||
+!parsePositiveInt(input, option, 3)) {
+cout << "Invalid option.\n";
+return;
+}
+if (option == 1) {
+list.sortBy(SortBy::ID);
+} else if (option == 2) {
+list.sortBy(SortBy::NAME);
+} else {
+list.sortBy(SortBy::GPA);
+}
+cout << "Records sorted.\n";
+list.displayStudents();
+}
+int main() {
+StudentList list;
+list.loadFromFile(FILE_NAME);
+int choice = 0;
+do {
+cout << "\n===== STUDENT RECORD SYSTEM =====\n";
+cout << "1. Add Student\n";
+cout << "2. Display Students\n";
+cout << "3. Delete Student\n";
+cout << "4. Sort Students\n";
+cout << "5. Save Records\n";
+cout << "6. Exit\n";
+string input;
+// If input ends (Ctrl+D / Ctrl+Z), save and stop instead of looping forever
+if (!readLine("Enter choice: ", input)) {
+cout << "\nInput ended. Saving and exiting...\n";
+list.saveToFile(FILE_NAME);
+break;
+}
+if (!parsePositiveInt(input, choice, 6)) {
+choice = 0;
+}
+switch (choice) {
+case 1:
+addStudentMenu(list);
+break;
+case 2:
+list.displayStudents();
+break;
+case 3:
+deleteStudentMenu(list);
+break;
+case 4:
+sortStudentsMenu(list);
+break;
+case 5:
+list.saveToFile(FILE_NAME);
+break;
+case 6:
+list.saveToFile(FILE_NAME);
+cout << "Exiting program...\n";
+break;
+default:
+cout << "Invalid choice. Try again.\n";
+}
+} while (choice != 6);
+return 0; // ~StudentList() frees all nodes automatically
+}
